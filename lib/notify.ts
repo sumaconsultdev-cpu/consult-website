@@ -26,22 +26,20 @@ export async function sendBookingConfirmation(b: BookingNotify): Promise<void> {
   const wa = whatsappProvider()
   const em = emailProvider()
 
-  // Customer WhatsApp
+  // Customer WhatsApp.
+  // IMPORTANT — variable order MUST match the approved Meta template:
+  //   {{1}} = Name
+  //   {{2}} = Date and time
+  //   {{3}} = Service type
+  //   {{4}} = Booking Id
+  // Changing this order silently corrupts every customer-facing message,
+  // so update the template at Meta first and bump this array in lock-step.
   const custWa = await wa.send({
     to: b.customerPhone,
+    type: 'template',
     template: env.metaWaTemplate(),
-    variables: [b.customerName, b.serviceName, datetime, b.bookingId],
+    variables: [b.customerName, datetime, b.serviceName, b.bookingId],
   })
-
-  // Admin WhatsApp (best-effort, only if configured)
-  const adminWa = env.adminWhatsappNumber()
-  if (adminWa) {
-    await wa.send({
-      to: adminWa,
-      template: env.metaWaTemplate(),
-      variables: [`Admin: new booking from ${b.customerName}`, b.serviceName, datetime, b.bookingId],
-    })
-  }
 
   // Email fallback for customer if WhatsApp failed AND we have email + provider
   if (!custWa.ok && b.customerEmail) {

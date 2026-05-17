@@ -41,6 +41,20 @@ export const env = {
   // Upstash
   upstashUrl: () => read('UPSTASH_REDIS_REST_URL', 'optional'),
   upstashToken: () => read('UPSTASH_REDIS_REST_TOKEN', 'optional'),
+  /**
+   * Dev-only escape hatch for the per-IP rate limiter. When testing the
+   * booking flow locally we routinely exceed 10 booking-creates / 10 min
+   * (the production limit), and Upstash counters survive `npm run dev`
+   * restarts — so the limit lingers between sessions.
+   *
+   * Setting `RATE_LIMIT_DISABLED=true` short-circuits every bucket. The
+   * flag is HARD-IGNORED in production — even if it leaks into a prod
+   * env file, the rate limiter still applies.
+   */
+  rateLimitDisabled: (): boolean => {
+    if (process.env.NODE_ENV === 'production') return false
+    return process.env.RATE_LIMIT_DISABLED === 'true'
+  },
 
   // Razorpay
   paymentDriver: (): 'mock' | 'razorpay' =>
@@ -55,6 +69,17 @@ export const env = {
   metaWaPhoneNumberId: () => read('META_WA_PHONE_NUMBER_ID', 'optional'),
   metaWaAccessToken: () => read('META_WA_ACCESS_TOKEN', 'optional'),
   metaWaTemplate: () => process.env.META_WA_TEMPLATE_CONFIRMATION || 'booking_confirmation',
+  metaWaAdminTemplate: () => process.env.META_WA_ADMIN_TEMPLATE || 'hello_world',
+  metaWaTemplateLanguage: () => process.env.META_WA_TEMPLATE_LANGUAGE || 'en_US',
+  /**
+   * Optional safety valve for Meta's test-mode delivery restrictions: when
+   * set, every WhatsApp message is redirected to this number regardless of
+   * the booking's actual customer phone. Meta's sandbox only delivers to
+   * pre-verified recipients, so we use this in dev to route all sends to a
+   * single verified handset. Leave UNSET in production so messages reach
+   * the real customer.
+   */
+  metaWaTestOverrideTo: () => read('META_WA_TEST_OVERRIDE_TO', 'optional'),
   adminWhatsappNumber: () => read('ADMIN_WHATSAPP_NUMBER', 'optional'),
 
   // Email

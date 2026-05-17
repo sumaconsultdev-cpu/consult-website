@@ -40,6 +40,11 @@ const limiters: Record<LimitName, Ratelimit | null> = redis
     }
 
 export async function limit(name: LimitName, key: string): Promise<{ ok: boolean; remaining: number; resetMs: number }> {
+  // Hard bypass for local development. `env.rateLimitDisabled()` refuses
+  // to honour the flag when NODE_ENV === 'production' so a stray
+  // RATE_LIMIT_DISABLED=true in a production env file cannot weaken the
+  // service. See lib/env.ts.
+  if (env.rateLimitDisabled()) return { ok: true, remaining: -1, resetMs: 0 }
   const l = limiters[name]
   if (!l) return { ok: true, remaining: -1, resetMs: 0 }
   const r = await l.limit(key)
