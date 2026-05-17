@@ -5,6 +5,7 @@ import { db } from '@/lib/supabase/server'
 import { BookingVerifySchema } from '@/lib/booking/validation'
 import { paymentProvider } from '@/lib/payment'
 import { sendBookingConfirmation } from '@/lib/notify'
+import { dropRetryPayload } from '@/lib/booking/retry-cache'
 import { log } from '@/lib/logger'
 
 export const runtime = 'nodejs'
@@ -66,19 +67,44 @@ export const POST = safe(async (req: NextRequest) => {
     .from('bookings')
     .update({
       payment_status: 'paid',
+      // Transition to a real "active" booking. The two guards below ensure
+      // we never resurrect a row that has already been cancelled (admin or
+      // hold-expiry cron) — those rows have booking_status != 'pending'.
+      booking_status: 'active',
       razorpay_payment_id: v.razorpayPaymentId,
       razorpay_signature: v.razorpaySignature,
       paid_at: new Date().toISOString(),
       hold_expires_at: null,
     })
     .eq('id', booking.id)
-    .eq('payment_status', 'pending')           // optimistic-concurrency guard
+    .eq('payment_status', 'pending')      // optimistic-concurrency guard
+    .eq('booking_status', 'pending')      // don't reactivate a cancelled row
     .select('id')
     .maybeSingle()
-  if (upErr || !updated) {
+  if (upErr) {
     log.error('verify.update.failed', { code: upErr?.code })
     return fail(500, 'db_error', 'Could not finalise your booking.')
   }
+  if (!updated) {
+    // We lost an optimistic race. Either a duplicate verify just promoted the
+    // booking (return 200), or the admin cancelled it in the meantime (409).
+    const { data: fresh } = await db()
+      .from('bookings')
+      .select('payment_status,booking_status')
+      .eq('id', booking.id)
+      .maybeSingle()
+    if (fresh?.payment_status === 'paid') {
+      return ok({ bookingId: booking.booking_id, status: 'paid' })
+    }
+    if (fresh?.booking_status === 'cancelled') {
+      return fail(409, 'cancelled', 'This booking was cancelled.')
+    }
+    return fail(500, 'db_error', 'Could not finalise your booking.')
+  }
+
+  // Drop the retry cache — booking is finalised, no point keeping the
+  // checkout payload around. Fire-and-forget; cache miss is harmless.
+  void dropRetryPayload(booking.booking_id)
 
   // Fire-and-forget notifications.
   ;(async () => {

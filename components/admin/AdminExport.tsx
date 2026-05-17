@@ -39,7 +39,7 @@ export function AdminExport() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `suma-export-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.enc`
+      a.download = `suma-export-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.zip`
       document.body.appendChild(a)
       a.click()
       a.remove()
@@ -56,8 +56,10 @@ export function AdminExport() {
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
-        <h1 className="text-3xl font-serif font-medium text-[#2D2D2D]">Encrypted Export</h1>
-        <p className="text-[#7A7A7A] mt-1">Download a passphrase-encrypted archive of all customers, bookings and services for offline archival.</p>
+        <h1 className="text-3xl font-serif font-medium text-[#2D2D2D]">Customer Export</h1>
+        <p className="text-[#7A7A7A] mt-1">
+          Download a password-protected ZIP containing each customer's personal details and their bookings.
+        </p>
       </div>
 
       <Card className="border-none shadow-sm">
@@ -65,8 +67,10 @@ export function AdminExport() {
           <div className="flex items-start gap-3 p-4 rounded-xl bg-[#8E7CC3]/5 border border-[#8E7CC3]/20">
             <ShieldCheck className="w-5 h-5 text-[#8E7CC3] shrink-0 mt-0.5" />
             <p className="text-sm text-[#4A4A4A]">
-              The archive is encrypted with AES-256-GCM using a key derived from your passphrase via scrypt. The passphrase is <strong>never stored</strong>.
-              If you lose it, the file cannot be decrypted by anyone (including us).
+              The ZIP file is locked with AES-256 using your passphrase. Sensitive details are decrypted
+              server-side before being written into the archive, so you don't need any extra tooling to
+              read them — just open the ZIP with the same passphrase.
+              <strong> The passphrase is never stored. If you lose it, the file cannot be opened by anyone.</strong>
             </p>
           </div>
 
@@ -80,14 +84,22 @@ export function AdminExport() {
               <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} className="h-12 bg-white" autoComplete="off" />
             </div>
             <Button type="submit" size="lg" className="w-full md:w-auto" disabled={busy}>
-              {busy ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Building archive…</> : <><FileLock2 className="w-4 h-4 mr-2" /> Generate encrypted export</>}
+              {busy ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Building archive…</> : <><FileLock2 className="w-4 h-4 mr-2" /> Generate password-protected ZIP</>}
             </Button>
           </form>
 
-          <div className="text-xs text-[#7A7A7A] space-y-1 border-t border-black/5 pt-4">
-            <p>To decrypt offline:</p>
-            <pre className="bg-[#FAF9F6] px-3 py-2 rounded-md overflow-x-auto"><code>node db/decrypt-export.mjs path/to/file.enc &lt;your-passphrase&gt;</code></pre>
-            <p>This produces a regular .zip with customers.csv, bookings.csv, services.csv, manifest.json, and bundle.json.</p>
+          <div className="text-xs text-[#7A7A7A] space-y-2 border-t border-black/5 pt-4">
+            <p className="font-medium text-[#5A5A5A]">Inside the ZIP</p>
+            <ul className="list-disc pl-5 space-y-1">
+              <li><code className="bg-[#FAF9F6] px-1.5 py-0.5 rounded">customer_details.txt</code> — full name, phone, email, date / time / place of birth, gender and notes for each customer.</li>
+              <li><code className="bg-[#FAF9F6] px-1.5 py-0.5 rounded">bookings.txt</code> — bookings grouped per customer with booking ID, date and payment ID only.</li>
+            </ul>
+            <p className="pt-2 font-medium text-[#5A5A5A]">Opening the ZIP</p>
+            <ul className="list-disc pl-5 space-y-1">
+              <li><strong>macOS</strong>: install <a className="underline" href="https://www.keka.io/" target="_blank" rel="noreferrer">Keka</a> (free) — the built-in Archive Utility cannot open AES-encrypted ZIPs.</li>
+              <li><strong>Windows</strong>: install <a className="underline" href="https://www.7-zip.org/" target="_blank" rel="noreferrer">7-Zip</a> (free).</li>
+              <li><strong>Linux</strong>: <code className="bg-[#FAF9F6] px-1.5 py-0.5 rounded">7z x suma-export-*.zip</code>.</li>
+            </ul>
           </div>
         </CardContent>
       </Card>

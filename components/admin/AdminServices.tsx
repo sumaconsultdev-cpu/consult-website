@@ -86,7 +86,7 @@ export function AdminServices() {
               <CardContent className="p-6 grid grid-cols-1 md:grid-cols-12 gap-4 items-start">
                 <div className="md:col-span-3 space-y-2">
                   <label className="text-xs uppercase font-medium text-[#7A7A7A]">Slug</label>
-                  <Input value={s.slug} readOnly className="h-11 font-mono text-sm bg-[#FAF9F6] cursor-not-allowed" />
+                  <Input value={s.slug} readOnly aria-readonly="true" tabIndex={-1} className="h-11 font-mono text-sm bg-[#FAF9F6] cursor-not-allowed" />
                   <p className="text-xs text-[#9A9A9A]">Immutable — change via DB if needed.</p>
                 </div>
                 <div className="md:col-span-4 space-y-2">

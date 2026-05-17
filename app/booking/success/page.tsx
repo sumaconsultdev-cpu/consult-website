@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { db } from '@/lib/supabase/server'
 import { formatDateTimeIST } from '@/lib/time'
+import { ClearDraftOnMount } from '@/components/booking/ClearDraftOnMount'
 
 export const metadata: Metadata = { title: 'Booking confirmed', robots: { index: false } }
 export const dynamic = 'force-dynamic'
@@ -31,6 +32,7 @@ export default async function SuccessPage({ searchParams }: { searchParams: Prom
 
   return (
     <div className="flex-1 flex items-center justify-center py-24 bg-[#FAF9F6]">
+      <ClearDraftOnMount />
       <div className="container mx-auto px-4 max-w-xl">
         <Card className="border-none shadow-lg text-center overflow-hidden">
           <div className="h-2 bg-[#8E7CC3] w-full" />

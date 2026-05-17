@@ -3,6 +3,7 @@ import { ok, fail, safe } from '@/lib/http'
 import { requireSession, UnauthorizedError } from '@/lib/auth/session'
 import { db } from '@/lib/supabase/server'
 import { addDaysIST, todayIST } from '@/lib/time'
+import { deriveBookingStatus } from '@/lib/booking/status'
 import { z } from 'zod'
 
 export const runtime = 'nodejs'
@@ -38,8 +39,8 @@ export const GET = safe(async (req: NextRequest) => {
   let query = db()
     .from('bookings')
     .select(`
-      id, booking_id, date, time_slot, payment_status, amount_paise,
-      service_name_snapshot, created_at, paid_at,
+      id, booking_id, date, time_slot, payment_status, booking_status, amount_paise,
+      service_name_snapshot, created_at, paid_at, cancelled_at,
       customer:customers (full_name, phone, email)
     `)
     .gte('date', from)
@@ -74,10 +75,12 @@ export const GET = safe(async (req: NextRequest) => {
       date: r.date,
       timeSlot: (r.time_slot as string).slice(0, 5),
       paymentStatus: r.payment_status,
+      bookingStatus: deriveBookingStatus(r.booking_status, r.date, r.time_slot),
       amountPaise: r.amount_paise,
       service: r.service_name_snapshot,
       createdAt: r.created_at,
       paidAt: r.paid_at,
+      cancelledAt: r.cancelled_at,
       customer: r.customer ? { name: r.customer.full_name, phone: r.customer.phone, email: r.customer.email } : null,
     })),
   })

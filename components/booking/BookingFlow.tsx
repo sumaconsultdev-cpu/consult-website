@@ -1,11 +1,15 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { loadDraft, saveDraft, clearDraft, draftHasContent, type DraftForm } from './draft-storage'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Calendar, Clock, CreditCard, ChevronRight, Loader2 } from 'lucide-react'
+import { Calendar, Clock, CreditCard, ChevronRight, Loader2, FlaskConical } from 'lucide-react'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog'
+import { Checkbox } from '@/components/ui/checkbox'
+import Link from 'next/link'
 import { toast } from 'sonner'
 
 type Service = { slug: string; name: string; description: string; pricePaise: number; durationMinutes: number }
@@ -20,26 +24,74 @@ type CreateResp = {
 
 const INR = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 })
 
+const EMPTY_FORM: DraftForm = {
+  serviceSlug: '',
+  date: '',
+  timeSlot: '',
+  fullName: '',
+  phone: '',
+  email: '',
+  dateOfBirth: '',
+  timeOfBirth: '',
+  placeOfBirth: '',
+  gender: '',
+  notes: '',
+}
+
 export function BookingFlow() {
   const router = useRouter()
   const [services, setServices] = useState<Service[] | null>(null)
   const [step, setStep] = useState(1)
-  const [form, setForm] = useState({
-    serviceSlug: '',
-    date: '',
-    timeSlot: '',
-    fullName: '',
-    phone: '',
-    email: '',
-    dateOfBirth: '',
-    timeOfBirth: '',
-    placeOfBirth: '',
-    gender: '' as '' | 'male' | 'female' | 'other' | 'prefer_not_to_say',
-    notes: '',
-  })
+  const [form, setForm] = useState<DraftForm>(EMPTY_FORM)
+  // Tracks whether we've finished the synchronous sessionStorage restore so
+  // we don't auto-save the empty initial state over an existing draft.
+  const restoredRef = useRef(false)
+  const [resumed, setResumed] = useState(false)
   const [slots, setSlots] = useState<Slot[] | null>(null)
   const [slotErr, setSlotErr] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  // Explicit consent — required before the booking can be submitted. We
+  // re-check this in `startPayment` as a defence-in-depth measure, in case
+  // the disabled state on the button is bypassed via the browser devtools.
+  const [consented, setConsented] = useState(false)
+  // Mock-checkout dialog state — populated only when PAYMENT_DRIVER=mock so
+  // testers can choose between success/failure/abandon outcomes. In real
+  // Razorpay mode this is never opened.
+  const [mockCheckout, setMockCheckout] = useState<{ data: CreateResp; busy: boolean } | null>(null)
+
+  // Restore the customer's in-progress booking from sessionStorage so a
+  // refresh, redirect to /booking/failed, or a retry doesn't drop their
+  // service / slot / personal details. Runs ONCE on mount — strictly before
+  // any persist effect — so the empty initial state doesn't overwrite an
+  // existing draft.
+  useEffect(() => {
+    const d = loadDraft()
+    if (d) {
+      if (d.form) setForm({ ...EMPTY_FORM, ...d.form })
+      if (typeof d.step === 'number' && d.step >= 1 && d.step <= 3) setStep(d.step)
+      if (draftHasContent(d)) setResumed(true)
+    }
+    restoredRef.current = true
+  }, [])
+
+  // Persist on every meaningful change after restore completes. Consent and
+  // submitting state are deliberately NOT persisted: consent must be freshly
+  // re-affirmed each session, and "submitting" is request-local.
+  useEffect(() => {
+    if (!restoredRef.current) return
+    saveDraft({ step, form })
+  }, [step, form])
+
+  function startOver() {
+    clearDraft()
+    setForm(EMPTY_FORM)
+    setStep(1)
+    setConsented(false)
+    setSlots(null)
+    setSlotErr(null)
+    setResumed(false)
+    toast.info('Draft cleared. Starting fresh.')
+  }
 
   // Load services on mount.
   useEffect(() => {
@@ -103,6 +155,11 @@ export function BookingFlow() {
   async function startPayment(e: React.FormEvent) {
     e.preventDefault()
     if (!step3Valid || submitting) return
+    if (!consented) {
+      // Defence-in-depth: the button is also disabled until consent is given.
+      toast.error('Please confirm the consent checkbox before proceeding.')
+      return
+    }
     setSubmitting(true)
     try {
       const res = await fetch('/api/booking/create', {
@@ -131,6 +188,17 @@ export function BookingFlow() {
           setForm((f) => ({ ...f, timeSlot: '' }))
           fetch(`/api/availability?date=${encodeURIComponent(form.date)}`)
             .then((r) => r.json()).then((d) => d.ok && setSlots(d.slots))
+        }
+        if (data.error.code === 'pending_exists') {
+          // The customer already has a booking awaiting payment — surface
+          // the retry UI for it instead of asking them to wait. The message
+          // already embeds the SC-XXXXXXXX id for clarity.
+          const m = data.error.message.match(/SC-[A-Z0-9]{8}/)
+          if (m) {
+            toast.message('You already have a pending booking — resuming it.')
+            router.push(`/booking/failed?id=${encodeURIComponent(m[0])}`)
+            return
+          }
         }
         toast.error(data.error.message)
         return
@@ -198,21 +266,51 @@ export function BookingFlow() {
   }
 
   async function runMockCheckout(data: CreateResp) {
-    // Mock mode: ask the dev API to mint a signed payment + signature.
-    const r = await fetch('/api/dev/mock-pay', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ orderId: data.payment.orderId }),
-    })
-    if (!r.ok) { toast.error('Mock checkout unavailable.'); return }
-    const m = await r.json()
-    if (!m.ok) { toast.error('Mock checkout failed.'); return }
-    await verifyAndRedirect({
-      bookingId: data.booking.bookingId,
-      orderId: data.payment.orderId,
-      paymentId: m.paymentId,
-      signature: m.signature,
-    })
+    // Mock mode: open a small dialog so the tester can pick the outcome.
+    // Real Razorpay never hits this path.
+    setMockCheckout({ data, busy: false })
+  }
+
+  async function completeMockCheckout(outcome: 'success' | 'fail') {
+    if (!mockCheckout) return
+    const { data } = mockCheckout
+    setMockCheckout({ data, busy: true })
+    try {
+      const r = await fetch('/api/dev/mock-pay', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ orderId: data.payment.orderId, outcome }),
+      })
+      if (!r.ok) { toast.error('Mock checkout unavailable.'); setMockCheckout({ data, busy: false }); return }
+      const m = await r.json()
+      if (!m.ok) { toast.error('Mock checkout failed.'); setMockCheckout({ data, busy: false }); return }
+      if (m.failed) {
+        // Server already marked the booking as failed — go straight to the
+        // failed page; do NOT call /verify (no valid signature to verify).
+        router.push(`/booking/failed?id=${encodeURIComponent(data.booking.bookingId)}`)
+        return
+      }
+      await verifyAndRedirect({
+        bookingId: data.booking.bookingId,
+        orderId: data.payment.orderId,
+        paymentId: m.paymentId,
+        signature: m.signature,
+      })
+    } catch {
+      toast.error('Network error.')
+      setMockCheckout({ data, busy: false })
+    }
+  }
+
+  function abandonMockCheckout() {
+    if (!mockCheckout) return
+    const { data } = mockCheckout
+    setMockCheckout(null)
+    // The booking row stays in `pending` state — the customer can resume
+    // payment from /booking/failed (which surfaces the Retry button) for
+    // the rest of the 10-minute hold. After that the cron RPC marks the
+    // row payment=failed + booking=cancelled.
+    router.push(`/booking/failed?id=${encodeURIComponent(data.booking.bookingId)}`)
   }
 
   return (
@@ -228,6 +326,20 @@ export function BookingFlow() {
         <div className="flex flex-col lg:flex-row gap-8">
           {/* Main Form */}
           <div className="w-full lg:w-2/3 space-y-6">
+            {resumed && (
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 rounded-xl border border-[#C5A880]/30 bg-[#C5A880]/5 px-4 py-3 text-sm text-[#5A5A5A]">
+                <span>
+                  We&apos;ve restored your in-progress booking so you can pick up where you left off.
+                </span>
+                <button
+                  type="button"
+                  onClick={startOver}
+                  className="underline text-[#7A5D2D] hover:text-[#5A4520] shrink-0"
+                >
+                  Start over
+                </button>
+              </div>
+            )}
             <div className="flex items-center justify-between mb-8 px-4 relative">
               {[
                 { num: 1, label: 'Service' },
@@ -275,7 +387,12 @@ export function BookingFlow() {
                                 <p className="text-[#7A7A7A] mt-1">{s.durationMinutes} min session</p>
                                 {s.description && <p className="text-sm text-[#9A9A9A] mt-2 max-w-xl">{s.description}</p>}
                               </div>
-                              <div className="text-xl font-medium text-[#C5A880]">{INR.format(s.pricePaise / 100)}</div>
+                              <div className="text-xl font-medium text-[#C5A880] whitespace-nowrap">
+                                {INR.format(s.pricePaise / 100)}
+                                <span className="text-sm font-normal text-[#9A9A9A] ml-1">
+                                  {s.durationMinutes === 60 ? '/hr' : `/${s.durationMinutes}min`}
+                                </span>
+                              </div>
                             </div>
                           </div>
                         ))}
@@ -378,6 +495,9 @@ export function BookingFlow() {
                           <Input value={form.placeOfBirth} maxLength={200} onChange={(e) => setForm({ ...form, placeOfBirth: e.target.value })} className="h-14 bg-white" />
                         </Field>
                       </div>
+                      <p className="text-xs text-[#7A7A7A] -mt-2">
+                        Your date, time and place of birth are encrypted before they are saved and only the consultant can view them.
+                      </p>
                       <Field label="Gender (optional)">
                         <select
                           value={form.gender}
@@ -399,11 +519,66 @@ export function BookingFlow() {
                           placeholder="Anything specific you'd like Suma to know in advance?"
                         />
                       </Field>
+
+                      <div className="flex items-start gap-3 p-4 rounded-xl bg-[#FAF9F6] border border-black/5">
+                        <Checkbox
+                          id="consent"
+                          checked={consented}
+                          onCheckedChange={(c) => setConsented(c === true)}
+                          className="mt-1 shrink-0"
+                          aria-describedby="consent-text"
+                        />
+                        {/*
+                          Intentionally NOT a <label htmlFor="consent">. A label
+                          re-fires its associated control's click for any click
+                          inside it, which means tapping the Privacy Policy link
+                          below would silently toggle the checkbox in addition
+                          to opening the link. We wire the toggle via a span+role
+                          so the link can live alongside the consent copy
+                          without any event-bubble interference.
+                        */}
+                        <div id="consent-text" className="text-sm text-[#4A4A4A] leading-relaxed">
+                          <span
+                            role="button"
+                            tabIndex={-1}
+                            onClick={() => setConsented((v) => !v)}
+                            className="cursor-pointer select-none"
+                          >
+                            I consent to Suma Consultation collecting, storing and processing the personal
+                            information I have shared above — including my contact details and the date,
+                            time and place of birth — for the purpose of providing this consultation.
+                            I confirm I have read the{' '}
+                          </span>
+                          <Link
+                            href="/privacy"
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="text-[#8E7CC3] underline hover:text-[#7A6BB0]"
+                          >
+                            Privacy Policy
+                          </Link>
+                          <span
+                            role="button"
+                            tabIndex={-1}
+                            onClick={() => setConsented((v) => !v)}
+                            className="cursor-pointer select-none"
+                          >
+                            .
+                          </span>
+                        </div>
+                      </div>
                     </form>
 
-                    <div className="mt-12 flex justify-between">
-                      <Button variant="outline" onClick={back} size="lg" type="button">Back</Button>
-                      <Button form="booking-form" type="submit" disabled={!step3Valid || submitting} size="lg" className="px-8">
+                    <div className="mt-12 flex flex-col-reverse sm:flex-row justify-between gap-3">
+                      <Button variant="outline" onClick={back} size="lg" type="button" className="w-full sm:w-auto">Back</Button>
+                      <Button
+                        form="booking-form"
+                        type="submit"
+                        disabled={!step3Valid || submitting || !consented}
+                        size="lg"
+                        className="w-full sm:w-auto sm:px-8"
+                      >
                         {submitting ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Securing slot…</> : 'Confirm & Pay'}
                       </Button>
                     </div>
@@ -446,6 +621,57 @@ export function BookingFlow() {
           </div>
         </div>
       </div>
+
+      {/* Mock checkout dialog — only opened when PAYMENT_DRIVER=mock */}
+      <Dialog open={!!mockCheckout} onOpenChange={(open) => { if (!open && !mockCheckout?.busy) setMockCheckout(null) }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <FlaskConical className="w-4 h-4 text-[#8E7CC3]" /> Mock checkout
+            </DialogTitle>
+            <DialogDescription>
+              Payments are running in <strong>mock mode</strong>. Choose how this booking should resolve so you can see each payment state in the admin dashboard.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm text-[#4A4A4A]">
+            <p>
+              Booking <span className="font-mono text-xs">{mockCheckout?.data.booking.bookingId}</span> · {' '}
+              {mockCheckout ? INR.format(mockCheckout.data.booking.amountPaise / 100) : ''}
+            </p>
+            <ul className="text-xs text-[#7A7A7A] space-y-1 pl-4 list-disc">
+              <li><strong>Pay (success)</strong> — verifies the mock signature → booking marked <code>paid</code>.</li>
+              <li><strong>Simulate failure</strong> — server marks the booking <code>failed</code>.</li>
+              <li><strong>Dismiss</strong> — booking stays <code>pending</code> for 10 minutes, then auto-expires.</li>
+            </ul>
+          </div>
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button
+              variant="outline"
+              className="w-full sm:w-auto"
+              onClick={abandonMockCheckout}
+              disabled={mockCheckout?.busy}
+            >
+              Dismiss
+            </Button>
+            <Button
+              variant="outline"
+              className="w-full sm:w-auto border-red-300 text-red-700 hover:bg-red-50 hover:text-red-700"
+              onClick={() => completeMockCheckout('fail')}
+              disabled={mockCheckout?.busy}
+            >
+              Simulate failure
+            </Button>
+            <Button
+              className="w-full sm:w-auto"
+              onClick={() => completeMockCheckout('success')}
+              disabled={mockCheckout?.busy}
+            >
+              {mockCheckout?.busy ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : null}
+              Pay (success)
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

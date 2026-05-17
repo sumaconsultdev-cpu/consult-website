@@ -18,7 +18,13 @@ export function SiteFooter() {
             <a href="#" className="hover:text-[#C5A880] transition-colors">WhatsApp</a>
           </div>
         </div>
-        <div className="mt-8 text-center text-sm text-[#9A9A9A]">
+        <div className="mt-6 text-center text-sm text-[#7A7A7A]">
+          <span className="block md:inline">For booking support: </span>
+          <a href="tel:+91XXXXXXXXXX" className="hover:text-[#C5A880] transition-colors">+91 XXXXX XXXXX</a>
+          <span className="hidden md:inline"> · </span>
+          <a href="mailto:support@sumaconsultation.com" className="block md:inline hover:text-[#C5A880] transition-colors">support@sumaconsultation.com</a>
+        </div>
+        <div className="mt-4 text-center text-sm text-[#9A9A9A]">
           &copy; {new Date().getFullYear()} Suma Consultation. All rights reserved.
         </div>
       </div>

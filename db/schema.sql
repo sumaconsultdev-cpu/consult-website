@@ -52,6 +52,18 @@ create table if not exists public.customers (
 --   expired   — pending lapsed past hold window, slot released
 --   failed    — payment explicitly failed
 --   cancelled — admin or customer cancelled (refund flow lives separately)
+--                NOTE: payment_status='cancelled' is legacy; new cancellations
+--                are recorded on booking_status (below) so payment history is
+--                preserved.
+-- booking_status lifecycle (mirrors the customer-facing state machine):
+--   pending   — default on insert. Customer is in checkout; the 10-minute
+--               hold guards the slot via the partial UNIQUE index below.
+--   active    — payment captured AND consultation slot is still in the future.
+--   completed — payment captured AND the slot has elapsed (cron-managed).
+--   cancelled — payment never succeeded (hold-expired/failed/admin-cancel)
+--               OR an admin explicitly cancelled a paid booking. Either way
+--               the slot is released. The original payment_status is kept
+--               for the audit trail.
 create table if not exists public.bookings (
   id                  uuid primary key default gen_random_uuid(),
   booking_id          text not null unique,                      -- human-friendly e.g. SC-7K3PQ9
@@ -67,8 +79,17 @@ create table if not exists public.bookings (
 
   payment_status      text not null
                       check (payment_status in ('pending','paid','expired','failed','cancelled')),
+  booking_status      text default 'pending'
+                      check (booking_status is null or booking_status in ('pending','active','completed','cancelled')),
   -- Auto-expiry timestamp for pending rows. NULL for terminal states.
   hold_expires_at     timestamptz,
+
+  -- AES-256-GCM encrypted JSON payload of sensitive PII
+  -- (dob, time-of-birth, place-of-birth, gender, notes). Decrypted only
+  -- server-side in admin routes. Plaintext PII columns on `customers` are
+  -- deprecated and no longer written by the booking-create route.
+  encrypted_payload   text,
+  cancellation_reason text,
 
   razorpay_order_id   text,
   razorpay_payment_id text,
@@ -80,19 +101,67 @@ create table if not exists public.bookings (
   cancelled_at        timestamptz
 );
 
+-- Idempotent upgrade for pre-existing databases: add booking_status,
+-- encrypted_payload, cancellation_reason if the table predates them. Safe to
+-- re-run; no-op when columns already exist.
+alter table public.bookings
+  add column if not exists booking_status text;
+alter table public.bookings
+  add column if not exists encrypted_payload text;
+alter table public.bookings
+  add column if not exists cancellation_reason text;
+
+-- Migrate the booking_status semantics. Each booking now carries an explicit
+-- state from creation onwards:
+--   pending → active → completed (happy path)
+--   pending → cancelled (hold expired / payment failed / admin cancel)
+--   active  → cancelled (admin cancel after payment)
+alter table public.bookings alter column booking_status drop not null;
+alter table public.bookings drop constraint if exists bookings_booking_status_check;
+alter table public.bookings
+  add constraint bookings_booking_status_check
+  check (booking_status is null or booking_status in ('pending','active','completed','cancelled'));
+alter table public.bookings alter column booking_status set default 'pending';
+
+-- Backfill historic rows so the new state machine is internally consistent.
+--   1. Pending payment that was wrongly tagged 'active' (or NULL) → 'pending'.
+update public.bookings
+   set booking_status = 'pending'
+ where payment_status = 'pending'
+   and (booking_status is null or booking_status = 'active');
+
+--   2. Any row whose payment definitively failed/expired/cancelled — drop
+--      booking_status to 'cancelled' so the slot is correctly released and
+--      the booking pill reflects reality. Also stamp cancelled_at if absent.
+update public.bookings
+   set booking_status = 'cancelled',
+       cancelled_at = coalesce(cancelled_at, now())
+ where payment_status in ('failed','expired','cancelled')
+   and (booking_status is null or booking_status in ('pending','active'));
+
+--   3. Paid + null → 'active'. Cron will flip past-slot rows to 'completed'
+--      on the next pass; the read-time derivation handles the lag.
+update public.bookings
+   set booking_status = 'active'
+ where payment_status = 'paid'
+   and booking_status is null;
+
 -- Indexes for the access patterns we actually run.
 create index if not exists bookings_date_idx       on public.bookings (date);
 create index if not exists bookings_customer_idx   on public.bookings (customer_id);
 create index if not exists bookings_status_idx     on public.bookings (payment_status);
+create index if not exists bookings_booking_status_idx on public.bookings (booking_status);
 create index if not exists bookings_hold_idx       on public.bookings (hold_expires_at)
   where payment_status = 'pending';
 
 -- THE critical invariant: at most one active booking per (date, time_slot).
--- Active = paid OR pending. Partial unique index avoids the need for triggers
--- and survives any application-level race, including parallel order creates.
-create unique index if not exists bookings_active_slot_uniq
+-- A row holds its slot iff booking_status IN ('pending','active'). The
+-- booking_status column is now the single source of truth — payment_status
+-- is the audit trail only.
+drop index if exists bookings_active_slot_uniq;
+create unique index bookings_active_slot_uniq
   on public.bookings (date, time_slot)
-  where payment_status in ('pending','paid');
+  where booking_status in ('pending','active');
 
 -- =============================================================================
 -- 4. Availability — per-date slot configuration set by admin.
@@ -257,22 +326,47 @@ insert into public.admin_user (id, username) values (1, 'admin')
 on conflict (id) do nothing;
 
 -- =============================================================================
--- Helper RPC — atomically release expired pending bookings.
--- Called by cron + opportunistically on availability read.
+-- Helper RPC — periodic booking-lifecycle maintenance.
+-- Called by Vercel cron every 2 minutes AND opportunistically on the public
+-- availability read so the slot view never lags behind for long.
+--
+-- Two transitions in one pass:
+--   1. Pending bookings past their 10-minute hold →
+--        payment_status = 'failed'
+--        booking_status = 'cancelled'
+--      The slot is released atomically through the partial UNIQUE index.
+--   2. Paid+active bookings whose IST date/time has elapsed →
+--        booking_status = 'completed'
+--      (payment_status stays 'paid' for the audit trail.)
 -- =============================================================================
 create or replace function public.release_expired_bookings()
 returns integer language plpgsql security definer as $$
 declare
-  released integer;
+  expired_n  integer := 0;
+  completed_n integer := 0;
 begin
   update public.bookings
-     set payment_status = 'expired',
+     set payment_status = 'failed',
+         booking_status = 'cancelled',
+         cancelled_at = coalesce(cancelled_at, now()),
+         hold_expires_at = null,
          updated_at = now()
    where payment_status = 'pending'
+     and booking_status = 'pending'
      and hold_expires_at is not null
      and hold_expires_at < now();
-  get diagnostics released = row_count;
-  return released;
+  get diagnostics expired_n = row_count;
+
+  update public.bookings
+     set booking_status = 'completed',
+         updated_at = now()
+   where payment_status = 'paid'
+     and booking_status = 'active'
+     -- Combine the IST date + slot, reinterpret as IST wall-clock, compare to UTC now()
+     and ((date + time_slot) at time zone 'Asia/Kolkata') < now();
+  get diagnostics completed_n = row_count;
+
+  return expired_n + completed_n;
 end;
 $$;
 revoke all on function public.release_expired_bookings() from public, anon, authenticated;

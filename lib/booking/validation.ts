@@ -52,6 +52,11 @@ export const BookingVerifySchema = z.object({
   razorpaySignature: z.string().min(8).max(256),
 })
 
+/** Admin-side cancellation. Reason is free-form, optional. */
+export const BookingCancelSchema = z.object({
+  reason: z.string().trim().max(500).optional(),
+})
+
 export const AvailabilityUpsertSchema = z.object({
   date: dateSchema,
   slots: z.array(timeSchema).max(48),

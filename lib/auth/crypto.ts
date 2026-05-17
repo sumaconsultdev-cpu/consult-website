@@ -41,3 +41,20 @@ export function decryptString(payload: string, purpose = 'totp'): string {
 export function sha256Hex(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
+
+/**
+ * JSON-aware wrappers used to store sensitive booking PII (DOB, time/place of
+ * birth, notes) at rest. The wire format is identical to `encryptString` —
+ * any payload that wasn't a string at encrypt-time is the caller's mistake.
+ *
+ * `purpose='booking-pii'` ensures HKDF derives a different key than the TOTP
+ * seed encryption, so a key recovered for one purpose cannot be used to
+ * decrypt the other.
+ */
+export function encryptJson(obj: unknown, purpose = 'booking-pii'): string {
+  return encryptString(JSON.stringify(obj), purpose)
+}
+
+export function decryptJson<T = unknown>(payload: string, purpose = 'booking-pii'): T {
+  return JSON.parse(decryptString(payload, purpose)) as T
+}

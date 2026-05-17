@@ -48,6 +48,14 @@ export function isMoreThanHoursAhead(dateStr: string, timeStr: string, minHours:
   return diffMs >= minHours * 60 * 60 * 1000
 }
 
+/** True if the IST date/time tuple has already elapsed. */
+export function isSlotInPast(dateStr: string, timeStr: string): boolean {
+  if (!isValidDateString(dateStr) || !isValidTimeString(timeStr)) return false
+  const ist = parse(`${dateStr} ${timeStr}`, 'yyyy-MM-dd HH:mm', new Date())
+  const utc = fromZonedTime(ist, IST)
+  return utc.getTime() < Date.now()
+}
+
 /** Add N days to an IST date string (`YYYY-MM-DD`). */
 export function addDaysIST(dateStr: string, days: number): string {
   const ist = parse(dateStr, 'yyyy-MM-dd', new Date())

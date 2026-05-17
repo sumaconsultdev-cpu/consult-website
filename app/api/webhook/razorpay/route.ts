@@ -4,6 +4,7 @@ import { limit } from '@/lib/rate-limit'
 import { db } from '@/lib/supabase/server'
 import { paymentProvider } from '@/lib/payment'
 import { sendBookingConfirmation } from '@/lib/notify'
+import { dropRetryPayload } from '@/lib/booking/retry-cache'
 import { log } from '@/lib/logger'
 
 export const runtime = 'nodejs'
@@ -78,16 +79,21 @@ export const POST = safe(async (req: NextRequest) => {
       .from('bookings')
       .update({
         payment_status: 'paid',
+        // Promote to a real "active" booking, but only if it's still in the
+        // 'pending' state. Cancelled/active rows are protected.
+        booking_status: 'active',
         razorpay_payment_id: parsed.paymentId ?? null,
         paid_at: new Date().toISOString(),
         hold_expires_at: null,
       })
       .eq('id', booking.id)
-      .in('payment_status', ['pending'])
+      .eq('payment_status', 'pending')
+      .eq('booking_status', 'pending')
       .select('id')
       .maybeSingle()
 
     if (updated) {
+      void dropRetryPayload(booking.booking_id)
       ;(async () => {
         const { data: cust } = await db()
           .from('customers')
@@ -112,11 +118,21 @@ export const POST = safe(async (req: NextRequest) => {
   }
 
   if (isFailed) {
+    // payment.failed: mark the booking row as failed-and-cancelled in one
+    // pass so the slot is released atomically. Guarded by payment_status =
+    // 'pending' so an already-paid row is never demoted.
     await db()
       .from('bookings')
-      .update({ payment_status: 'failed', hold_expires_at: null })
+      .update({
+        payment_status: 'failed',
+        booking_status: 'cancelled',
+        cancelled_at: new Date().toISOString(),
+        hold_expires_at: null,
+      })
       .eq('id', booking.id)
       .eq('payment_status', 'pending')
+      .eq('booking_status', 'pending')
+    void dropRetryPayload(booking.booking_id)
     await db().from('webhook_events').update({ processed_at: new Date().toISOString() }).eq('event_id', parsed.eventId)
     return ok({ marked_failed: true })
   }

@@ -44,11 +44,15 @@ async function definedSlotsFor(date: string): Promise<string[]> {
 }
 
 async function bookedSlotsFor(date: string): Promise<Set<string>> {
+  // Mirror the partial UNIQUE index condition exactly: a slot is taken iff
+  // booking_status IN ('pending','active'). The booking_status column is
+  // the single source of truth — cancelled, completed, failed and expired
+  // bookings drop out of the index and free their slot.
   const { data } = await db()
     .from('bookings')
     .select('time_slot')
     .eq('date', date)
-    .in('payment_status', ['pending', 'paid'])
+    .in('booking_status', ['pending', 'active'])
   const set = new Set<string>()
   for (const r of data ?? []) set.add((r.time_slot as string).slice(0, 5))
   return set
